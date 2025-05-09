@@ -1,0 +1,31 @@
+[project]
+name = "pixachu"
+version = "0.0.1"
+description = ""
+authors = [
+    {name = "Raphael Tang",email = "tang.raphael@gmail.com"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.13,<4"
+dependencies = [
+    "text2pic4ai (>=0.0.1,<0.0.2)",
+    "torch (>=2.7.0,<3.0.0)",
+    "torchvision (>=0.22.0,<0.23.0)",
+    "torchaudio (>=2.7.0,<3.0.0)"
+]
+package-mode = true
+
+[[tool.poetry.source]]
+name = "torch"
+url = "https://download.pytorch.org/whl/cu118"
+priority = "supplemental"
+
+[tool.poetry]
+packages = [
+    { include = "pixachu" },
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
