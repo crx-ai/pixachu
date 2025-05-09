@@ -12,7 +12,11 @@ dependencies = [
     "text2pic4ai (>=0.0.1,<0.0.2)",
     "torch (>=2.7.0,<3.0.0)",
     "torchvision (>=0.22.0,<0.23.0)",
-    "torchaudio (>=2.7.0,<3.0.0)"
+    "torchaudio (>=2.7.0,<3.0.0)",
+    "transformers (>=4.51.3,<5.0.0)",
+    "accelerate (>=1.6.0,<2.0.0)",
+    "peft (>=0.15.2,<0.16.0)",
+    "datasets (>=3.6.0,<4.0.0)"
 ]
 package-mode = true
 
