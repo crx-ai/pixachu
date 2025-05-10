@@ -1,59 +1,47 @@
-from typing import Literal, TypedDict, Unpack
+from typing import TypedDict, Unpack
 
-from transformers import ModernBertConfig
+from transformers import Dinov2Config
+
+from ._auto import AutoRegisterConfigMixin
 
 
 class PixachuConfigDict(TypedDict, total=False):
-    # These from ModernBertConfig
-    vocab_size: int
+    # These from Dinov2Config
     hidden_size: int
-    intermediate_size: int
     num_hidden_layers: int
     num_attention_heads: int
-    hidden_activation: str
-    max_position_embeddings: int
+    mlp_ratio: int
+    hidden_act: str
+    hidden_dropout_prob: float
+    attention_probs_dropout_prob: float
     initializer_range: float
-    initializer_cutoff_factor: float
-    norm_eps: float
-    norm_bias: bool
-    pad_token_id: int
-    eos_token_id: int
-    bos_token_id: int
-    cls_token_id: int
-    sep_token_id: int
-    global_rope_theta: float
-    attention_bias: bool
-    attention_dropout: float
-    global_attn_every_n_layers: int
-    local_attention: int
-    local_rope_theta: float
-    embedding_dropout: float
-    mlp_bias: bool
-    mlp_dropout: float
-    decoder_bias: bool
-    classifier_pooling: Literal["cls", "mean"]
-    classifier_dropout: float
-    classifier_bias: bool
-    classifier_activation: str
-    deterministic_flash_attn: bool
-    sparse_prediction: bool
-    sparse_pred_ignore_index: int
-    reference_compile: bool
-    repad_logits_with_grad: bool
+    layer_norm_eps: float
+    image_size: int
+    patch_size: int
+    num_channels: int
+    qkv_bias: bool
+    layerscale_value: float
+    drop_path_rate: float
+    use_swiglu_ffn: bool
+    out_features: list[str] | None
+    out_indices: list[int] | None
+    apply_layernorm: bool
+    reshape_hidden_states: bool
+    use_mask_token: bool
 
     # These are specific to Pixachu
-    patch_pixel_size: int
-    logit_scale: float
-    logit_bias: float
+    character_pixel_size: int
 
 
-class PixachuConfig(ModernBertConfig):
+class PixachuConfig(AutoRegisterConfigMixin, Dinov2Config):
     model_type = "pixachu"
 
     def __init__(self, **kwargs: Unpack[PixachuConfigDict]):
         super().__init__(**kwargs)
 
         # Pixachu-specific parameters
-        self.patch_pixel_size = kwargs.get("patch_pixel_size", 14)
-        self.logit_scale = kwargs.get("logit_scale", 2.6592)
-        self.logit_bias = kwargs.get("logit_bias", 0.0)
+        self.character_pixel_size = kwargs.get("character_pixel_size", 28)
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls.register_for_auto_class()

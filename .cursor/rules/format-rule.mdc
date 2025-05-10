@@ -1,0 +1,78 @@
+---
+description: Formatting Python files
+globs: *.py
+---
+Format the Python code (not variable names) so that it follows my style, e.g.,
+
+```python
+x = 5
+y = fn()
+
+# If it's a function with many arguments (exceeding 120 columns):
+class A:
+    def func(
+        self,
+        x: int = 10,
+        y: float = 10,
+        foo: dict[str, Any] | None = None,
+    ) -> Generator[int, None, None]:
+        x = 10
+        y = do_something_else()
+
+        for idx in range(10):
+            if x > 5:
+                yield 5
+        
+        for idx in range(100):  # Put a new line between control blocks
+            do_something_here()
+            do_something_else()
+
+            if x > 5:  # Put another newline before control statements if they're not immediately following a control statement
+                do_something()
+
+            yield 10
+        
+        do_something_else_again()
+        do_this()
+
+        x1 = 100
+        y1 = 100
+
+        # Put another newline before return if it's not directly following a control
+        # statement (e.g., for, if, ...) or a function name (e.g., func2 below)
+        return
+
+
+# If it's a function with not many arguments
+class B:
+    def func2(self, x: int = 10) -> None:
+        return
+
+
+def func3() -> int:
+    x1 = do_something()
+    y1 = something_else()
+
+    return x1  # Put another newline before return if it's not directly following a control statement (e.g., for, if, ...) or a function name (e.g., func2 as shown above)
+
+
+# If it's a very long statement, string, function call, etc., (more than 120 columns)
+# use parentheses and split across multiple lines, e.g.,
+long_string = (
+    "My oh my, what a very long string that I certainly would not want my children "
+    "to know about."
+)
+
+if (
+    x == 5
+    and y == 10
+    and z == 20
+    and (
+        t == 5
+        or x == 20
+        or t > 10
+    )
+):
+    ...
+
+```
