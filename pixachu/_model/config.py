@@ -48,7 +48,7 @@ class PixachuConfig(AutoRegisterConfigMixin, Dinov2Config):
 
         # Pixachu-specific parameters
         self.character_pixel_size = kwargs.get("character_pixel_size", 24)
-        self.masking_proportion = kwargs.get("masking_proportion", 0.30)  # 30% > 15%
+        self.masking_proportion = kwargs.get("masking_proportion", 0.30)  # 30% is better than 15%
         self.ema_momentum = kwargs.get("ema_momentum", 0.996)
         self.student_temp = kwargs.get("student_temp", 0.1)
         self.teacher_temp = kwargs.get("teacher_temp", 0.04)

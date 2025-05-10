@@ -22,7 +22,7 @@ from transformers.models.dinov2.modeling_dinov2 import (
     Dinov2SwiGLUFFN,
 )
 
-from .auto import AutoRegisterModelMixin
+from .auto import AutoRegisterMixin
 from .config import PixachuConfig
 
 
@@ -244,7 +244,7 @@ class PixachuLayer(nn.Module):
         return hidden_states, None
 
 
-class PixachuModel(AutoRegisterModelMixin, Dinov2Model):
+class PixachuModel(AutoRegisterMixin, Dinov2Model):
     """
     A DINOv2 backbone where every transformer layer uses rotary 2-D
     self-attention (PixachuSelfAttention).  The rest of the architecture
@@ -369,7 +369,7 @@ class PixachuModel(AutoRegisterModelMixin, Dinov2Model):
         return x_rot.view(b, s, h, d)
 
 
-class PixachuForMaskedImageModeling(AutoRegisterModelMixin, PreTrainedModel, auto_cls=AutoModelForMaskedImageModeling):
+class PixachuForMaskedImageModeling(AutoRegisterMixin, PreTrainedModel, auto_cls=AutoModelForMaskedImageModeling):
     """
     Pixachu student/teacher wrapper implementing the training losses described in
     the DINOv2 paper (Caron et al., 2023).
@@ -389,7 +389,6 @@ class PixachuForMaskedImageModeling(AutoRegisterModelMixin, PreTrainedModel, aut
         super().__init__(config)
         self.teacher = PixachuModel(config)
         self.teacher.teacher_mode()
-
         self.student = PixachuModel(config)
 
         proj_dim: int = config.proj_dim
