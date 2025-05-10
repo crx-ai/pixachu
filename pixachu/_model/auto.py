@@ -9,5 +9,6 @@ class AutoRegisterConfigMixin:
 
 class AutoRegisterModelMixin:
     def __init_subclass__(cls, **kwargs):
+        auto_cls = kwargs.pop("auto_cls", AutoModel)
         super().__init_subclass__(**kwargs)
-        AutoModel.register(cls.config_class, cls, exist_ok=True)
+        auto_cls.register(cls.config_class, cls, exist_ok=True)

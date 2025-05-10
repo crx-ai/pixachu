@@ -13,8 +13,8 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from transformers import Dinov2Model
-from transformers.modeling_outputs import BaseModelOutput
+from transformers import AutoModelForMaskedImageModeling, Dinov2Model, PreTrainedModel
+from transformers.modeling_outputs import BaseModelOutput, MaskedImageModelingOutput
 from transformers.models.dinov2.modeling_dinov2 import (
     Dinov2DropPath,
     Dinov2MLP,
@@ -22,8 +22,8 @@ from transformers.models.dinov2.modeling_dinov2 import (
     Dinov2SwiGLUFFN,
 )
 
-from ._auto import AutoRegisterModelMixin
-from ._config import PixachuConfig
+from .auto import AutoRegisterModelMixin
+from .config import PixachuConfig
 
 
 def _apply_rotary_3d(
@@ -256,8 +256,15 @@ class PixachuModel(AutoRegisterModelMixin, Dinov2Model):
     def __init__(self, config: PixachuConfig):
         super().__init__(config)
 
+        self._is_teacher = False
+
         for i in range(len(self.encoder.layer)):
             self.encoder.layer[i] = PixachuLayer(config)
+
+    def teacher_mode(self):
+        self.requires_grad_(False)
+        self.eval()
+        self._is_teacher = True
 
     def forward(
         self,
@@ -266,6 +273,10 @@ class PixachuModel(AutoRegisterModelMixin, Dinov2Model):
         output_hidden_states: bool = None,
         return_dict: bool = None,
     ):
+        if self._is_teacher:
+            self.eval()
+            self.requires_grad_(False)
+
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         batch_size, _, height, width = pixel_values.shape
@@ -356,3 +367,198 @@ class PixachuModel(AutoRegisterModelMixin, Dinov2Model):
 
         x_rot = torch.stack((r0, r1, r2), dim=-1)  # (..., 3)
         return x_rot.view(b, s, h, d)
+
+
+class PixachuForMaskedImageModeling(AutoRegisterModelMixin, PreTrainedModel, auto_cls=AutoModelForMaskedImageModeling):
+    """
+    Pixachu student/teacher wrapper implementing the training losses described in
+    the DINOv2 paper (Caron et al., 2023).
+
+    The class token is used for the image-level (DINO) objective, while the patch
+    tokens are used for the patch-level (iBOT) objective. Teacher targets are
+    centered with a 3-iteration Sinkhorn-Knopp algorithm. A KoLeo regularizer is
+    applied to the (ℓ2-normalised) student class tokens.
+
+    Args:
+        config: Pixachu configuration.
+    """
+
+    config_class = PixachuConfig
+
+    def __init__(self, config: PixachuConfig) -> None:
+        super().__init__(config)
+        self.teacher = PixachuModel(config)
+        self.teacher.teacher_mode()
+
+        self.student = PixachuModel(config)
+
+        proj_dim: int = config.proj_dim
+        proto_dim: int = config.num_prototypes
+
+        def _make_head() -> nn.Module:
+            return nn.Sequential(
+                nn.Linear(config.hidden_size, proj_dim, bias=False),
+                nn.GELU(),
+                nn.Linear(proj_dim, proto_dim, bias=False),
+            )
+
+        self.dino_head_student = _make_head()
+        self.dino_head_teacher = _make_head()
+        self.ibot_head_student = _make_head()
+        self.ibot_head_teacher = _make_head()
+
+        self.register_buffer("global_step", torch.zeros(1, dtype=torch.long))
+        self.momentum: float = config.ema_momentum
+        self.student_temp: float = config.student_temp
+        self.teacher_temp: float = config.teacher_temp
+        self.koleo_weight: float = config.koleo_weight
+
+        self.mask_token = nn.Parameter(
+            torch.empty(3, config.character_pixel_size, config.character_pixel_size).normal_(std=0.02)
+        )
+
+    @staticmethod
+    @torch.no_grad()
+    def _sinkhorn_knopp(
+        z: torch.Tensor,
+        n_iters: int = 3,
+        eps: float = 1e-6,
+    ) -> torch.Tensor:
+        """Run the Sinkhorn-Knopp algorithm on `z`."""
+        Q = z.exp().t()  # (K, B)
+        Q /= Q.sum() + eps
+
+        K, B = Q.shape
+        r = torch.ones(K, device=z.device) / K
+        c = torch.ones(B, device=z.device) / B
+
+        for _ in range(n_iters):
+            u = Q.sum(dim=1)
+            Q *= (r / (u + eps)).unsqueeze(1)
+
+            v = Q.sum(dim=0)
+            Q *= (c / (v + eps)).unsqueeze(0)
+
+        return (Q / (Q.sum(dim=0, keepdim=True) + eps)).t()  # (B, K)
+
+    @torch.no_grad()
+    def _update_teacher(self) -> None:
+        """Exponential-moving-average update of teacher parameters."""
+        tau = self.momentum
+
+        for t_param, s_param in zip(self.teacher.parameters(), self.student.parameters(), strict=True):
+            t_param.data.mul_(tau).add_(s_param.data * (1.0 - tau))
+
+        for t_buffer, s_buffer in zip(self.teacher.buffers(), self.student.buffers(), strict=True):
+            t_buffer.data.copy_(s_buffer.data)
+
+    @staticmethod
+    def _koleo_regularizer(
+        x: torch.Tensor,
+        eps: float = 1e-6,
+    ) -> torch.Tensor:
+        """
+        KoLeo regularizer (Sablayrolles et al., 2019).
+
+        Args:
+            x: (batch, feat_dim) – ℓ2-normalised features.
+
+        Returns:
+            torch.Tensor: KoLeo regularization loss.
+        """
+        dist = torch.cdist(x, x, p=2)  # (B, B)
+        dist += torch.eye(x.size(0), device=x.device) * 1e6  # mask diagonal
+        dn, _ = dist.min(dim=1)
+
+        return -(dn + eps).log().mean()
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        bool_masked_pos: torch.BoolTensor | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+    ):
+        """
+        Args:
+            pixel_values: Input images for both student and teacher.
+            bool_masked_pos: (batch, num_patches) mask *for the student only*.
+
+        Returns:
+            MaskedImageModelingOutput or tuple: Output containing loss and optionally other values.
+        """
+        with torch.no_grad():
+            teacher_out = self.teacher(
+                pixel_values,
+                output_attentions=False,
+                output_hidden_states=False,
+                return_dict=True,
+            ).last_hidden_state
+
+        if self.training:
+            pixel_values_seq = pixel_values.view(
+                pixel_values.size(0),  # B
+                pixel_values.size(1),  # C
+                pixel_values.size(2),  # H
+                pixel_values.size(3) // self.config.character_pixel_size,  # seq_len
+                self.config.character_pixel_size,  # patch_w
+            )
+
+            batch_size, channels, height, seq_len, patch_w = pixel_values_seq.shape
+            num_mask = int(seq_len * self.config.masking_proportion)
+
+            rand_indices = torch.stack(
+                [torch.randperm(seq_len, device=pixel_values.device)[:num_mask] for _ in range(batch_size)]
+            )  # → (B, num_mask)
+
+            rand_indices = rand_indices[:, None, None, :].expand(-1, channels, height, -1)
+            pixel_values_seq[:, :, :, rand_indices, :] = self.mask_token[None, :, :, None, :]
+
+        student_out = self.student(
+            pixel_values,
+            output_attentions=False,
+            output_hidden_states=False,
+            return_dict=True,
+        ).last_hidden_state
+
+        cls_s, patch_s = student_out[:, 0], student_out[:, 1:]
+        cls_t, patch_t = teacher_out[:, 0], teacher_out[:, 1:]
+
+        ps = F.softmax(self.dino_head_student(cls_s) / self.student_temp, dim=-1)
+
+        with torch.no_grad():
+            pt_raw = self.dino_head_teacher(cls_t) / self.teacher_temp
+            pt = self._sinkhorn_knopp(pt_raw)
+
+        if bool_masked_pos is None:
+            patch_loss = torch.tensor(0.0, device=pixel_values.device)
+        else:
+            mask = bool_masked_pos  # (B, P)
+            s_mask_tokens = patch_s[mask]  # (N, D)
+            t_vis_tokens = patch_t[mask]  # (N, D)
+
+            ps_i = F.softmax(self.ibot_head_student(s_mask_tokens) / self.student_temp, dim=-1)
+
+            with torch.no_grad():
+                pt_i_raw = self.ibot_head_teacher(t_vis_tokens) / self.teacher_temp
+                pt_i = self._sinkhorn_knopp(pt_i_raw)
+
+            patch_loss = -(pt_i * (ps_i + 1e-6).log()).sum(dim=1).mean()
+
+        dino_loss = -(pt * (ps + 1e-6).log()).sum(dim=1).mean()
+        koleo_loss = self._koleo_regularizer(F.normalize(cls_s, dim=-1))
+        loss = dino_loss + patch_loss + self.koleo_weight * koleo_loss
+
+        self._update_teacher()
+        self.global_step += 1
+
+        if not (return_dict if return_dict is not None else self.config.use_return_dict):
+            return (loss,)
+
+        return MaskedImageModelingOutput(
+            loss=loss,
+            reconstruction=None,
+            hidden_states=None,
+            attentions=None,
+        )

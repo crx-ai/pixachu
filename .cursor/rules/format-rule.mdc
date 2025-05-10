@@ -76,7 +76,9 @@ if (
     ...
 ```
 
-Use Google style instead of Numpy style for docstrings.
+Use Google style instead of Numpy style for docstrings. Also use `dict`, `list`, `tuple` type hints,
+not `typing.Dict`, `typing.List`, and `typing.Tuple`. Use `Type | None` instead of `typing.Optional[Type]`
+and `Type1 | Type2` instead of `Union[Type1, Type2]`.
 
 IMPORTANT: remove large blocky comments such as these below:
 
@@ -88,15 +90,16 @@ IMPORTANT: remove large blocky comments such as these below:
 # ------------------------------------------------
 
 # ──── Block comment here ──────────────────────────
+# ------------------------------- Block comment here
 ```
 
-IMPORTANT: keep all other comments, such as
+VERY VERY IMPORTANT: keep all other comments, such as those below:
 
 ```python
 x = 5  # some comment
 
 # Some comment here, not blocky with hyphens, many pound signs, and lines. It
-# spans multiple lines, and that's fine!
+# spans multiple lines, and that's fine! Don't delete this!
 x = do_something_func()
 
 def test() -> int:
@@ -107,5 +110,5 @@ def test() -> int:
     Returns:
         Something here ...
     """
-    return do_something()
+    return do_something()  # some comment here, this is fine and keep this!
 ```

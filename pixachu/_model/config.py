@@ -2,7 +2,7 @@ from typing import TypedDict, Unpack
 
 from transformers import Dinov2Config
 
-from ._auto import AutoRegisterConfigMixin
+from .auto import AutoRegisterConfigMixin
 
 
 class PixachuConfigDict(TypedDict, total=False):
@@ -31,6 +31,13 @@ class PixachuConfigDict(TypedDict, total=False):
 
     # These are specific to Pixachu
     character_pixel_size: int
+    masking_proportion: float
+    ema_momentum: float
+    student_temp: float
+    teacher_temp: float
+    koleo_weight: float
+    proj_dim: int
+    num_prototypes: int
 
 
 class PixachuConfig(AutoRegisterConfigMixin, Dinov2Config):
@@ -41,6 +48,13 @@ class PixachuConfig(AutoRegisterConfigMixin, Dinov2Config):
 
         # Pixachu-specific parameters
         self.character_pixel_size = kwargs.get("character_pixel_size", 24)
+        self.masking_proportion = kwargs.get("masking_proportion", 0.30)  # 30% > 15%
+        self.ema_momentum = kwargs.get("ema_momentum", 0.996)
+        self.student_temp = kwargs.get("student_temp", 0.1)
+        self.teacher_temp = kwargs.get("teacher_temp", 0.04)
+        self.koleo_weight = kwargs.get("koleo_weight", 1.0)
+        self.proj_dim = kwargs.get("proj_dim", 1024)
+        self.num_prototypes = kwargs.get("num_prototypes", 8192)
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
