@@ -1,5 +1,6 @@
 # Pixachu files
-models/
+_test*.py
+_models/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

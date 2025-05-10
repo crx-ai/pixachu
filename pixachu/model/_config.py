@@ -40,7 +40,7 @@ class PixachuConfig(AutoRegisterConfigMixin, Dinov2Config):
         super().__init__(**kwargs)
 
         # Pixachu-specific parameters
-        self.character_pixel_size = kwargs.get("character_pixel_size", 28)
+        self.character_pixel_size = kwargs.get("character_pixel_size", 24)
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)

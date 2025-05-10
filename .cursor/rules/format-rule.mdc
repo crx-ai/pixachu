@@ -74,5 +74,38 @@ if (
     )
 ):
     ...
+```
 
+Use Google style instead of Numpy style for docstrings.
+
+IMPORTANT: remove large blocky comments such as these below:
+
+```python
+# ############### Block comment ##################
+
+# ------------------------------------------------
+# Block comment here
+# ------------------------------------------------
+
+# ──── Block comment here ──────────────────────────
+```
+
+IMPORTANT: keep all other comments, such as
+
+```python
+x = 5  # some comment
+
+# Some comment here, not blocky with hyphens, many pound signs, and lines. It
+# spans multiple lines, and that's fine!
+x = do_something_func()
+
+def test() -> int:
+    """
+    This is a docstring, not a large blocky comment! Keep this even if
+    it spans many lines.
+
+    Returns:
+        Something here ...
+    """
+    return do_something()
 ```

@@ -1,14 +1,14 @@
-# PixachuModel – DINOv2 backbone + rotary embeddings based on 2-D L2 distances
+# PixachuModel – DINOv2 backbone + rotary embeddings based on 2D coordinates
 #
-# NB: the code purposefully re-uses most of the original DINOv2 building
+# NB: the code purposefully reuses most of the original DINOv2 building
 #     blocks (MLP, LayerNorm, etc.) and only swaps the attention module.
 #
-#     Every patch has coordinates (row, col) in the patch grid.  The rotary
-#     angle θ used for a given feature dimension is:
-#         θ = r · 1 / 10000^(2i/d)
-#     where r = sqrt(row² + col²).  CLS / special tokens simply receive r = 0
-#     (→ no rotation).
-
+#     Every patch has coordinates (row, col) in the patch grid. The rotary
+#     angles θ and ψ used for a given feature dimension are:
+#         θ = r_row · 1 / 10000^(2i/d)
+#         ψ = r_col · 1 / 10000^(2i/d)
+#     where r_row = sqrt(row²) and r_col = sqrt(col²). CLS / special tokens
+#     simply receive r = 0 (→ no rotation).
 
 import torch
 import torch.nn as nn
@@ -26,34 +26,36 @@ from ._auto import AutoRegisterModelMixin
 from ._config import PixachuConfig
 
 
-def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+def _apply_rotary_3d(
+    x: torch.Tensor,
+    cos_theta: torch.Tensor,
+    sin_theta: torch.Tensor,
+    cos_psi: torch.Tensor,
+    sin_psi: torch.Tensor,
+) -> torch.Tensor:
     """
-    (…, 2i, 2i+1) -> (…, -x_{2i+1}, x_{2i})
+    Apply the 3-D rotation to (batch, seq_len, n_heads, head_dim) tensor.
     """
-    x1 = x[..., ::2]
-    x2 = x[..., 1::2]
-    return torch.cat((-x2, x1), dim=-1)
+    b, s, h, d = x.shape
+    t = d // 3  # number of triplets
+    x = x.view(b, s, h, t, 3)  # -> (..., 3)
 
+    # broadcast trig tensors to (1, seq_len, 1, t)
+    ct = cos_theta[None, :, None, :]  # cos θ
+    st = sin_theta[None, :, None, :]  # sin θ
+    cp = cos_psi[None, :, None, :]  # cos ψ
+    sp = sin_psi[None, :, None, :]  # sin ψ
 
-def _apply_rotary(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Broadcasted rotary application.
+    # components
+    x0, x1, x2 = x[..., 0], x[..., 1], x[..., 2]
 
-    q, k       : (batch, seq_len, n_heads, head_dim)
-    cos & sin  : (seq_len, 1, head_dim)
-    """
-    cos = cos.to(dtype=q.dtype)
-    sin = sin.to(dtype=q.dtype)
+    # rotation (see matrix in doc-string)
+    r0 = (cp * x0) + (sp * st * x1) + (sp * ct * x2)
+    r1 = (ct * x1) - (st * x2)
+    r2 = (-sp * x0) + (cp * st * x1) + (cp * ct * x2)
 
-    q_rot = (q * cos) + (_rotate_half(q) * sin)
-    k_rot = (k * cos) + (_rotate_half(k) * sin)
-
-    return q_rot, k_rot
+    x_rot = torch.stack((r0, r1, r2), dim=-1)  # (..., 3)
+    return x_rot.view(b, s, h, d)
 
 
 class PixachuSelfAttention(nn.Module):
@@ -70,6 +72,11 @@ class PixachuSelfAttention(nn.Module):
         self.n_heads = config.num_attention_heads
         self.head_dim = config.hidden_size // self.n_heads
 
+        if self.head_dim % 3 != 0:
+            raise ValueError(
+                f"For 3-D rotary embeddings the head dimension must be divisible by 3 (got head_dim = {self.head_dim})."
+            )
+
         if self.head_dim * self.n_heads != config.hidden_size:
             raise ValueError("hidden_size must be divisible by num_attention_heads")
 
@@ -84,57 +91,62 @@ class PixachuSelfAttention(nn.Module):
         self.attn_drop = nn.Dropout(config.attention_probs_dropout_prob)
 
         # rotary cache
-        self.register_buffer("cos_cached", torch.empty(0), persistent=False)
-        self.register_buffer("sin_cached", torch.empty(0), persistent=False)
+        self.register_buffer("cos_theta_cached", torch.empty(0), persistent=False)
+        self.register_buffer("sin_theta_cached", torch.empty(0), persistent=False)
+        self.register_buffer("cos_psi_cached", torch.empty(0), persistent=False)
+        self.register_buffer("sin_psi_cached", torch.empty(0), persistent=False)
         self._cached_meta: tuple[int, int, int] = (0, 0, 0)  # (seq_len, rows, cols)
 
-    def _build_cos_sin(
+    def _build_rotary_params(
         self,
         seq_len: int,
         rows: int,
         cols: int,
         device: torch.device,
         dtype: torch.dtype,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        scale: float = 1.0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Pre-computes cos & sin tensors of shape (seq_len, 1, head_dim).
-
-        Token 0 (CLS) is assigned r = 0.
+        Pre-compute the four trigonometric tensors needed for the 3-D rotation.
+        Shapes: (seq_len, n_triplets)
         """
-        # Check cache
-        if (seq_len, rows, cols) == self._cached_meta and self.cos_cached.numel() != 0:
+        if (seq_len, rows, cols) == self._cached_meta and self.cos_theta_cached.numel() != 0:
+            # return cached version on the proper device / dtype
             return (
-                self.cos_cached.to(device=device, dtype=dtype),
-                self.sin_cached.to(device=device, dtype=dtype),
+                self.cos_theta_cached.to(device=device, dtype=dtype),
+                self.sin_theta_cached.to(device=device, dtype=dtype),
+                self.cos_psi_cached.to(device=device, dtype=dtype),
+                self.sin_psi_cached.to(device=device, dtype=dtype),
             )
 
-        # Inverse frequency the standard way
+        n_triplets = self.head_dim // 3
+        # Standard RoPE inverse frequency but for triplets (step = 3)
         inv_freq = 1.0 / (
-            10000 ** (torch.arange(0, self.head_dim, 2, device=device, dtype=dtype) / self.head_dim)
-        )  # (head_dim//2,)
+            10000 ** (torch.arange(0, self.head_dim, 3, device=device, dtype=dtype) / (self.head_dim * scale))
+        )  # (n_triplets,)
 
         # Token-to-grid mapping
         ids = torch.arange(seq_len, device=device)
         cls_offset = 1 if seq_len != rows * cols else 0
-        grid_ids = (ids - cls_offset).clamp(min=0)  # negative → CLS → r = 0
+        grid_ids = (ids - cls_offset).clamp(min=0)
 
-        row_ids = grid_ids // cols
-        col_ids = grid_ids % cols
-        r = (row_ids.float() ** 2 + col_ids.float() ** 2).sqrt()  # (seq_len,)
+        row_ids = grid_ids // cols  # θ  ← row
+        col_ids = grid_ids % cols  # ψ  ← col
 
-        # Outer product to obtain frequencies
-        freqs = torch.outer(r, inv_freq)  # (seq_len, head_dim//2)
-        emb = torch.cat([freqs, freqs], dim=-1)  # (seq_len, head_dim)
+        theta = row_ids.float()[:, None] * inv_freq  # (seq_len, n_triplets)
+        psi = col_ids.float()[:, None] * inv_freq
 
-        cos = emb.cos()[:, None, :]  # (seq_len, 1, head_dim)
-        sin = emb.sin()[:, None, :]
+        cos_theta, sin_theta = theta.cos(), theta.sin()
+        cos_psi, sin_psi = psi.cos(), psi.sin()
 
-        # Cache
-        self.cos_cached = cos.clone().detach()
-        self.sin_cached = sin.clone().detach()
+        # cache them
+        self.cos_theta_cached = cos_theta.clone().detach()
+        self.sin_theta_cached = sin_theta.clone().detach()
+        self.cos_psi_cached = cos_psi.clone().detach()
+        self.sin_psi_cached = sin_psi.clone().detach()
         self._cached_meta = (seq_len, rows, cols)
 
-        return cos, sin
+        return cos_theta, sin_theta, cos_psi, sin_psi
 
     def forward(
         self,
@@ -159,9 +171,17 @@ class PixachuSelfAttention(nn.Module):
         k = k.view(bsz, seq_len, self.n_heads, self.head_dim)
         v = v.view(bsz, seq_len, self.n_heads, self.head_dim)
 
-        # Rotary
-        cos, sin = self._build_cos_sin(seq_len, rows, cols, q.device, q.dtype)
-        q, k = _apply_rotary(q, k, cos, sin)
+        # Perform smaller rotations for smaller patches due to increased sequence length
+        scale = self.config.character_pixel_size // self.config.patch_size
+
+        # Rotary parameters
+        (cos_theta, sin_theta, cos_psi, sin_psi) = self._build_rotary_params(
+            seq_len, rows, cols, q.device, q.dtype, scale=scale
+        )
+
+        # Apply 3-D rotation to q & k
+        q = _apply_rotary_3d(q, cos_theta, sin_theta, cos_psi, sin_psi)
+        k = _apply_rotary_3d(k, cos_theta, sin_theta, cos_psi, sin_psi)
 
         # Attention
         q = q.transpose(1, 2)  # (batch, n_heads, seq_len, head_dim)
@@ -304,3 +324,35 @@ class PixachuModel(AutoRegisterModelMixin, Dinov2Model):
             hidden_states=tuple(all_hidden_states) if output_hidden_states else None,
             attentions=tuple(all_attentions) if output_attentions else None,
         )
+
+    @staticmethod
+    def _apply_rotary_3d(
+        x: torch.Tensor,
+        cos_theta: torch.Tensor,
+        sin_theta: torch.Tensor,
+        cos_psi: torch.Tensor,
+        sin_psi: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Apply the 3-D rotation to (batch, seq_len, n_heads, head_dim) tensor.
+        """
+        b, s, h, d = x.shape
+        t = d // 3  # number of triplets
+        x = x.view(b, s, h, t, 3)  # -> (..., 3)
+
+        # broadcast trig tensors to (1, seq_len, 1, t)
+        ct = cos_theta[None, :, None, :]  # cos θ
+        st = sin_theta[None, :, None, :]  # sin θ
+        cp = cos_psi[None, :, None, :]  # cos ψ
+        sp = sin_psi[None, :, None, :]  # sin ψ
+
+        # components
+        x0, x1, x2 = x[..., 0], x[..., 1], x[..., 2]
+
+        # rotation (see matrix in doc-string)
+        r0 = (cp * x0) + (sp * st * x1) + (sp * ct * x2)
+        r1 = (ct * x1) - (st * x2)
+        r2 = (-sp * x0) + (cp * st * x1) + (cp * ct * x2)
+
+        x_rot = torch.stack((r0, r1, r2), dim=-1)  # (..., 3)
+        return x_rot.view(b, s, h, d)
